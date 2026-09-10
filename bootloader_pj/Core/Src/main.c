@@ -39,18 +39,32 @@
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 #define FLASH_SECTOR2_BASE_ADDESS	0x8008000U
+#define BL_RX_LEN					200U
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+CRC_HandleTypeDef hcrc;
+
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+uint8_t bl_rx_buffer[BL_RX_LEN];
+uint8_t supported_commands[] = {
+                                 BL_GET_VER ,
+                                 BL_GET_HELP,
+                                 BL_GET_CID,
+                                 BL_GET_RDP_STATUS,
+                                 BL_GO_TO_ADDR,
+                                 BL_FLASH_ERASE,
+                                 BL_MEM_WRITE,
+                                 BL_READ_SECTOR_P_STATUS} ;
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_CRC_Init(void);
 static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 static void printmsg(char *format,...);
@@ -60,7 +74,6 @@ void  bootloader_jump_to_user_app(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-char data[] = "Hello from bootloader\r\n";
 /* USER CODE END 0 */
 
 /**
@@ -92,18 +105,19 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_CRC_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
   /* Lets check whether button is pressed or not, if not pressed jump to user application */
 	if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin)) {
-		printmsg("BL_DEBUG_MSG:Button is pressed .. going to BL mode\n\r");
 
 		/* Bootloader mode */
+		///printmsg("BL_DEBUG_MSG:Bootloader mode\n");
 		bootloader_uart_read_data();
 	} else {
-		printmsg("BL_DEBUG_MSG:Button is not pressed .. executing user app\n\r");
 
 		/* User application mode */
+		//printmsg("BL_DEBUG_MSG:User application mode\n");
 		bootloader_jump_to_user_app();
 
 	}
@@ -114,6 +128,7 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
+
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
@@ -163,6 +178,32 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief CRC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_CRC_Init(void)
+{
+
+  /* USER CODE BEGIN CRC_Init 0 */
+
+  /* USER CODE END CRC_Init 0 */
+
+  /* USER CODE BEGIN CRC_Init 1 */
+
+  /* USER CODE END CRC_Init 1 */
+  hcrc.Instance = CRC;
+  if (HAL_CRC_Init(&hcrc) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN CRC_Init 2 */
+
+  /* USER CODE END CRC_Init 2 */
+
 }
 
 /**
@@ -236,9 +277,60 @@ static void printmsg(char *format,...) {
   va_end(args);
 }
 
-void  bootloader_uart_read_data(void)
-{
+void  bootloader_uart_read_data(void) {
+  uint8_t rcv_len=0;
 
+  while(1) {
+    memset(bl_rx_buffer,0,200);
+    /* we will read and decode the commands coming from host */
+    /* first read only one byte from the host , which is the "length" field of the command packet */
+    HAL_UART_Receive(&huart2, bl_rx_buffer, 1, HAL_MAX_DELAY);
+    rcv_len= bl_rx_buffer[0];
+    HAL_UART_Receive(&huart2, &bl_rx_buffer[1], rcv_len, HAL_MAX_DELAY);
+
+    switch ( bl_rx_buffer[1] ) {
+      case BL_GET_VER:
+          bootloader_handle_getver_cmd(bl_rx_buffer);
+          break;
+      case BL_GET_HELP:
+          bootloader_handle_gethelp_cmd(bl_rx_buffer);
+          break;
+      case BL_GET_CID:
+          bootloader_handle_getcid_cmd(bl_rx_buffer);
+          break;
+      case BL_GET_RDP_STATUS:
+          bootloader_handle_getrdp_cmd(bl_rx_buffer);
+          break;
+      case BL_GO_TO_ADDR:
+          bootloader_handle_go_cmd(bl_rx_buffer);
+          break;
+      case BL_FLASH_ERASE:
+          bootloader_handle_flash_erase_cmd(bl_rx_buffer);
+          break;
+      case BL_MEM_WRITE:
+          bootloader_handle_mem_write_cmd(bl_rx_buffer);
+          break;
+      case BL_EN_RW_PROTECT:
+          bootloader_handle_en_rw_protect(bl_rx_buffer);
+          break;
+      case BL_MEM_READ:
+          bootloader_handle_mem_read(bl_rx_buffer);
+          break;
+      case BL_READ_SECTOR_P_STATUS:
+          bootloader_handle_read_sector_protection_status(bl_rx_buffer);
+          break;
+      case BL_OTP_READ:
+          bootloader_handle_read_otp(bl_rx_buffer);
+          break;
+      case BL_DIS_R_W_PROTECT:
+          bootloader_handle_dis_rw_protect(bl_rx_buffer);
+          break;
+       default:
+         // printmsg("BL_DEBUG_MSG:Invalid command code received from host \n");
+          break;
+
+    }
+  }
 }
 void  bootloader_jump_to_user_app(void)
 {
@@ -264,6 +356,144 @@ void  bootloader_jump_to_user_app(void)
 	/* Jump to reset handler of the user application */
 	app_reset_handler();
 }
+
+/* Helper function to handle BL_GET_VER command */
+void bootloader_handle_getver_cmd(uint8_t *bl_rx_buffer)
+{
+	uint8_t bl_version = 0;
+
+	/* Total length of the command packet */
+	uint32_t command_packet_len = bl_rx_buffer[0] + 1;
+
+	/* Extract the CRC32 send by HOST */
+	uint32_t host_crc = *((uint32_t *)(bl_rx_buffer + command_packet_len - 4));
+
+	if (! bootloader_verify_crc(&bl_rx_buffer[0], command_packet_len - 4, host_crc))
+	{
+		bootloader_send_ack(bl_rx_buffer[0], 1);
+		bl_version = get_bootloader_version();
+		bootloader_uart_write_data(&bl_version, 1);
+	}
+	else {
+		// checksum is wrong send nack
+		bootloader_send_nack();
+	}
+
+}
+void bootloader_handle_gethelp_cmd(uint8_t *pBuffer)
+{
+	// Total length of the command packet
+	uint32_t common_packet_len = bl_rx_buffer[0] + 1;
+
+	// extract the CRC32 sent by the Host
+	uint32_t host_crc = *((uint32_t *)(bl_rx_buffer + common_packet_len - 4));
+
+	if (! bootloader_verify_crc(&bl_rx_buffer[0], common_packet_len - 4, host_crc))
+	{
+		bootloader_send_ack(pBuffer[0], sizeof(supported_commands));
+		bootloader_uart_write_data(supported_commands, sizeof(supported_commands));
+	}
+	else {
+		bootloader_send_nack();
+	}
+}
+void bootloader_handle_getcid_cmd(uint8_t *pBuffer)
+{
+
+}
+void bootloader_handle_getrdp_cmd(uint8_t *pBuffer)
+{
+
+}
+void bootloader_handle_go_cmd(uint8_t *pBuffer)
+{
+
+}
+void bootloader_handle_flash_erase_cmd(uint8_t *pBuffer)
+{
+
+}
+void bootloader_handle_mem_write_cmd(uint8_t *pBuffer)
+{
+
+}
+void bootloader_handle_en_rw_protect(uint8_t *pBuffer)
+{
+
+}
+void bootloader_handle_mem_read (uint8_t *pBuffer)
+{
+
+}
+void bootloader_handle_read_sector_protection_status(uint8_t *pBuffer)
+{
+
+}
+void bootloader_handle_read_otp(uint8_t *pBuffer)
+{
+
+}
+void bootloader_handle_dis_rw_protect(uint8_t *pBuffer)
+{
+
+}
+
+//This verifies the CRC of the given buffer in pData .
+uint8_t bootloader_verify_crc (uint8_t *pData, uint32_t len,uint32_t crc_host)
+{
+	uint32_t check_value = 0xFF;
+
+	for (uint32_t i = 0; i < len; i++)
+	{
+		uint32_t data = pData[i];
+		check_value = HAL_CRC_Accumulate(&hcrc, &data, 1);
+	}
+
+	/* Reset CRC Calculation Unit */
+	__HAL_CRC_DR_RESET(&hcrc);
+
+	if (check_value == crc_host)
+	{
+		return VERIFY_CRC_SUCCESS;
+	}
+
+	return VERIFY_CRC_FAIL;
+}
+
+/* This function sends ACK if CRC matches along with "len to follow" */
+void bootloader_send_ack(uint8_t command_code, uint8_t follow_len)
+{
+	/* we send 2 byte.. first byte is ack and the second byte is len value */
+	uint8_t ack_buf[2];
+	ack_buf[0] = BL_ACK;
+	ack_buf[1] = follow_len;
+	HAL_UART_Transmit(&huart2, ack_buf, 2, HAL_MAX_DELAY);
+}
+
+/*This function sends NACK */
+void bootloader_send_nack(void) {
+
+  uint8_t nack = BL_NACK;
+  HAL_UART_Transmit(&huart2, &nack, 1, HAL_MAX_DELAY);
+}
+
+
+//Just returns the macro value .
+uint8_t get_bootloader_version(void)
+{
+  return (uint8_t)BL_VERSION;
+}
+
+/* This function writes data */
+void bootloader_uart_write_data(uint8_t *pBuffer,uint32_t len)
+{
+  HAL_UART_Transmit(&huart2, pBuffer , len, HAL_MAX_DELAY);
+}
+
+
+
+
+
 /* USER CODE END 4 */
 
 /**
