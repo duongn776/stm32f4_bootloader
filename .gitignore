@@ -1,0 +1,21 @@
+# STM32CubeIDE workspace metadata
+.metadata/
+**/.settings/
+
+# Generated build output
+**/Debug/
+**/Release/
+*.o
+*.elf
+*.map
+*.list
+*.d
+*.su
+*.cyclo
+
+# Temporary/editor files
+*.swp
+*.swo
+*~
+Thumbs.db
+Desktop.ini
