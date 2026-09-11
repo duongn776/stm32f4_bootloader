@@ -397,17 +397,81 @@ void bootloader_handle_gethelp_cmd(uint8_t *pBuffer)
 		bootloader_send_nack();
 	}
 }
+
+/*Helper function to handle BL_GET_CID command */
 void bootloader_handle_getcid_cmd(uint8_t *pBuffer)
 {
+	uint16_t bl_chip_id = 0;
+
+	// Total length of the command packet
+	uint32_t command_packet_len = bl_rx_buffer[0] + 1;
+
+	//extract the CRC32 sent by the Host
+	uint32_t host_crc = *((uint32_t *)(bl_rx_buffer + command_packet_len - 4));
+
+	if (! bootloader_verify_crc(bl_rx_buffer, command_packet_len - 4, host_crc))
+	{
+		bootloader_send_ack(pBuffer[0], 2);
+		bl_chip_id = get_mcu_chip_id();
+		bootloader_uart_write_data((uint8_t*)&bl_chip_id, 2);
+	}else {
+		bootloader_send_nack();
+	}
+
 
 }
 void bootloader_handle_getrdp_cmd(uint8_t *pBuffer)
 {
+	uint8_t rdp_level = 0;
+	// Total length of the command packet
+	uint32_t command_packet_len = bl_rx_buffer[0] + 1;
 
+	//extract the CRC32 sent by the Host
+	uint32_t host_crc = *((uint32_t *) (bl_rx_buffer + command_packet_len - 4));
+
+	if (! bootloader_verify_crc(bl_rx_buffer, command_packet_len - 4, host_crc))
+	{
+		bootloader_send_ack(pBuffer[0], 1);
+		rdp_level = get_flash_rdp_level();
+		bootloader_uart_write_data(&rdp_level, 1);
+	}else {
+		bootloader_send_nack();
+	}
 }
+
+/*Helper function to handle BL_GO_TO_ADDR command */
 void bootloader_handle_go_cmd(uint8_t *pBuffer)
 {
+	uint32_t go_address = 0;
+	uint8_t addr_valid = ADDR_VALID;
+	uint8_t addr_invalid = ADDR_INVALID;
 
+	// Total length of the command packet
+	uint32_t command_packet_len = bl_rx_buffer[0] + 1;
+
+	//extract the CRC32 sent by the Host
+	uint32_t host_crc = *((uint32_t*) (bl_rx_buffer + command_packet_len - 4));
+
+	if (!bootloader_verify_crc(bl_rx_buffer, command_packet_len - 4, host_crc)) {
+		bootloader_send_ack(pBuffer[0], 1);
+		//extract the go address
+		go_address = *((uint32_t *)&pBuffer[2]);
+		if (verify_address(go_address) == ADDR_VALID)
+		{
+			//tell host that address is fine
+			bootloader_uart_write_data(&addr_valid, 1);
+
+			go_address += 1; //make T bit = 1
+
+			void (*lets_jump)(void) = (void *)go_address;
+			lets_jump();
+		}else {
+			//tell host that address is invalid
+			bootloader_uart_write_data(&addr_invalid,1);
+		}
+	} else {
+		bootloader_send_nack();
+	}
 }
 void bootloader_handle_flash_erase_cmd(uint8_t *pBuffer)
 {
@@ -490,7 +554,65 @@ void bootloader_uart_write_data(uint8_t *pBuffer,uint32_t len)
   HAL_UART_Transmit(&huart2, pBuffer , len, HAL_MAX_DELAY);
 }
 
+//Read the chip identifier or device Identifier
+uint16_t get_mcu_chip_id(void)
+{
+	uint16_t chip_id;
+	chip_id = (uint16_t)(DBGMCU->IDCODE) & 0x0FFF;
 
+	return chip_id;
+}
+
+uint8_t get_flash_rdp_level(void)
+{
+	uint8_t rdp_status = 0;
+#if 0
+  FLASH_OBProgramInitTypeDef  ob_handle;
+  HAL_FLASHEx_OBGetConfig(&ob_handle);
+  rdp_status = (uint8_t)ob_handle.RDPLevel;
+#else
+	volatile uint32_t *option_bytes = (volatile uint32_t*)0x1FFFC000;
+	uint32_t option_value = *option_bytes;
+	rdp_status = (uint8_t) ((option_value >> 8) & 0xFF);
+#endif
+	return rdp_status;
+
+}
+
+//verify the address sent by the host .
+uint8_t verify_address(uint32_t go_address) {
+
+  //so, what are the valid addresses to which we can jump ?
+  //can we jump to system memory ? yes
+  //can we jump to sram1 memory ?  yes
+  //can we jump to sram2 memory ? yes
+  //can we jump to backup sram memory ? yes
+  //can we jump to peripheral memory ? its possible , but dont allow. so no
+  //can we jump to external memory ? yes.
+
+  //incomplete -poorly written .. optimize it
+  if ( go_address >= SRAM1_BASE && go_address <= SRAM1_END) {
+
+    return ADDR_VALID;
+  } else if ( go_address >= SRAM2_BASE && go_address <= SRAM2_END) {
+
+    return ADDR_VALID;
+  } else if ( go_address >= FLASH_BASE && go_address <= FLASH_END) {
+
+    return ADDR_VALID;
+  } else if ( go_address >= BKPSRAM_BASE && go_address <= BKPSRAM_END) {
+
+    return ADDR_VALID;
+  } else
+    return ADDR_INVALID;
+}
+
+uint8_t execute_flash_erase(uint8_t sector_number , uint8_t number_of_sector);
+uint8_t execute_mem_write(uint8_t *pBuffer, uint32_t mem_address, uint32_t len);
+
+uint8_t configure_flash_sector_rw_protection(uint8_t sector_details, uint8_t protection_mode, uint8_t disable);
+
+uint16_t read_OB_rw_protection_status(void);
 
 
 
