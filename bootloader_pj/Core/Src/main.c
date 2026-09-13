@@ -504,7 +504,7 @@ void bootloader_handle_mem_write_cmd(uint8_t *pBuffer)
 
 
 	uint32_t command_packet_len = pBuffer[0] + 1;
-	 uint32_t host_crc = *((uint32_t * ) (pBuffer + command_packet_len - 4) );
+	uint32_t host_crc = *((uint32_t * ) (pBuffer + command_packet_len - 4) );
 	 if (! bootloader_verify_crc(&bl_rx_buffer[0], command_packet_len - 4, host_crc))
 	 {
 		 bootloader_send_ack(pBuffer[0], 1);
@@ -529,8 +529,75 @@ void bootloader_handle_en_rw_protect(uint8_t *pBuffer)
 {
 
 }
+
+/*Helper function to handle BL_MEM_READ command */
+/*
+	   * Request format:
+	   * [0]     length to follow (10)
+	   * [1]     BL_MEM_READ
+	   * [2..5] start address, little-endian
+	   * [6]     number of bytes to read
+	   * [7..10] CRC32
+	   *
+	   * Response format on success:
+	   * [BL_ACK, number of bytes] followed by the requested data.
+*/
 void bootloader_handle_mem_read (uint8_t *pBuffer)
 {
+	const uint32_t request_length = 11;
+	uint8_t read_length;
+	uint8_t read_buffer[BL_RX_LEN];
+	memset(read_buffer, 0, BL_RX_LEN);
+	uint32_t mem_address, last_address, host_crc;
+
+	if (pBuffer == NULL || pBuffer[0] != request_length - 1)
+	{
+		bootloader_send_nack();
+		return;
+	}
+
+	read_length = pBuffer[6];
+
+	uint32_t command_packet_len = pBuffer[0] + 1;
+	host_crc = *((uint32_t * ) (pBuffer + command_packet_len - 4) );
+	mem_address = *((uint32_t *)(&pBuffer[2]));
+
+	if (read_length == 0U || read_length > BL_RX_LEN ||
+	      mem_address > (UINT32_MAX - ((uint32_t)read_length - 1U))) {
+	    printmsg("BL_DEBUG_MSG:invalid mem read range\n");
+	    bootloader_send_nack();
+	    return;
+	}
+
+	if (bootloader_verify_crc(
+	          pBuffer,
+	          request_length - 4U,
+	          host_crc) != VERIFY_CRC_SUCCESS) {
+	    printmsg("BL_DEBUG_MSG:checksum fail !!\n");
+	    bootloader_send_nack();
+	    return;
+	 }
+	last_address = mem_address + (uint32_t)read_length - 1U;
+
+	 if (verify_address(mem_address) != ADDR_VALID ||
+	      verify_address(last_address) != ADDR_VALID) {
+	    uint8_t status = ADDR_INVALID;
+
+	    printmsg("BL_DEBUG_MSG:invalid mem read address\n");
+	    bootloader_send_ack(pBuffer[0], 1U);
+	    bootloader_uart_write_data(&status, 1U);
+	    return;
+	 }
+
+	 for (uint32_t i = 0; i < read_length; i++)
+	 {
+		 read_buffer[i] = *((volatile uint8_t *) (mem_address + i));
+	 }
+	 printmsg("BL_DEBUG_MSG:mem read address: %#x length: %d\n",
+	            mem_address, read_length);
+	 bootloader_send_ack(pBuffer[0], read_length);
+	 bootloader_uart_write_data(read_buffer, read_length);
+
 
 }
 void bootloader_handle_read_sector_protection_status(uint8_t *pBuffer)
