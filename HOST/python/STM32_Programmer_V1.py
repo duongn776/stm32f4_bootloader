@@ -34,6 +34,7 @@ COMMAND_BL_GET_RDP_STATUS_LEN                       =6
 COMMAND_BL_GO_TO_ADDR_LEN                           =10
 COMMAND_BL_FLASH_ERASE_LEN                          =8
 COMMAND_BL_MEM_WRITE_LEN                            = 11
+COMMAND_BL_MEM_READ_LEN                             = 11
 COMMAND_BL_EN_R_W_PROTECT_LEN                       =8
 COMMAND_BL_READ_SECTOR_P_STATUS_LEN                 =6
 COMMAND_BL_DIS_R_W_PROTECT_LEN                      =6
@@ -226,7 +227,19 @@ def process_COMMAND_BL_MEM_WRITE(length):
         print("\n   Write_status: UNKNOWN_ERROR")
     print("\n")
     
+def process_COMMAND_BL_MEM_READ(length):
+    value = read_serial_port(length)
 
+    if len(value) != length:
+        print("\n   Read_status: TIMEOUT")
+        return
+
+    data = bytearray(value)
+    print("\n   Read data ({} byte):".format(length), end=' ')
+    for byte in data:
+        print("0x{:02x}".format(byte), end=' ')
+    print()
+    
 def process_COMMAND_BL_FLASH_MASS_ERASE(length):
     pass
 
@@ -544,7 +557,43 @@ def decode_menu_command_code(command):
         
     elif(command == 10):
         print("\n   Command == > COMMAND_BL_MEM_READ")
-        print("\n   This command is not supported")
+        try:
+            mem_add = int(
+                input("\n   Enter the memory read address (hex): "),
+                16)
+            read_length = input("\n   Enter the number of bytes to read (1-200): "))
+        except ValueError:
+            print("\n   Invalid address or length")
+            return
+
+        if mem_add < 0 or mem_add > 0xFFFFFFFF:
+            print("\n   Invalid address or length")
+            return
+
+        if read_length < 1 or read_length > 200:
+            print("\n   Invalid read length (must be 1-200)")
+            return
+
+        data_buf[0] = COMMAND_BL_MEM_READ_LEN - 1
+        data_buf[1] = COMMAND_BL_MEM_READ
+
+        data_buf[2] = word_to_byte(mem_add,1,1)
+        data_buf[3] = word_to_byte(mem_add,2,1)
+        data_buf[4] = word_to_byte(mem_add,3,1)
+        data_buf[5] = word_to_byte(mem_add,4,1)
+        data_buf[6] = read_length
+
+        crc32 = get_crc(data_buf, COMMAND_BL_MEM_READ_LEN - 4)
+        data_buf[7] = word_to_byte(crc32, 1, 1)
+        data_buf[8] = word_to_byte(crc32, 2, 1)
+        data_buf[9] = word_to_byte(crc32, 3, 1)
+        data_buf[10] = word_to_byte(crc32, 4, 1)
+
+        Write_to_serial_port(data_buf[0], 1)
+        for i in data_buf[1:COMMAND_BL_MEM_READ_LEN]:
+            Write_to_serial_port(i, COMMAND_BL_MEM_READ_LEN - 1)
+
+        ret_value = read_bootloader_reply(data_buf[1])
     elif(command == 11):
         print("\n   Command == > COMMAND_BL_READ_SECTOR_P_STATUS")
         data_buf[0] = COMMAND_BL_READ_SECTOR_P_STATUS_LEN-1 
@@ -642,9 +691,12 @@ def read_bootloader_reply(command_code):
             elif(command_code) == COMMAND_BL_FLASH_ERASE:
                 process_COMMAND_BL_FLASH_ERASE(len_to_follow)
                 
+            elif(command_code) == COMMAND_BL_MEM_READ:
+                process_COMMAND_BL_MEM_READ(len_to_follow)
+
             elif(command_code) == COMMAND_BL_MEM_WRITE:
-                process_COMMAND_BL_MEM_WRITE(len_to_follow)
-                
+                            process_COMMAND_BL_MEM_WRITE(len_to_follow)
+
             elif(command_code) == COMMAND_BL_READ_SECTOR_P_STATUS:
                 process_COMMAND_BL_READ_SECTOR_STATUS(len_to_follow)
                 
