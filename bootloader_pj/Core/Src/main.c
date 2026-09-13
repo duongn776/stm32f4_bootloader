@@ -383,12 +383,12 @@ void bootloader_handle_getver_cmd(uint8_t *bl_rx_buffer)
 void bootloader_handle_gethelp_cmd(uint8_t *pBuffer)
 {
 	// Total length of the command packet
-	uint32_t common_packet_len = bl_rx_buffer[0] + 1;
+	uint32_t common_packet_len = pBuffer[0] + 1;
 
 	// extract the CRC32 sent by the Host
-	uint32_t host_crc = *((uint32_t *)(bl_rx_buffer + common_packet_len - 4));
+	uint32_t host_crc = *((uint32_t *)(pBuffer + common_packet_len - 4));
 
-	if (! bootloader_verify_crc(&bl_rx_buffer[0], common_packet_len - 4, host_crc))
+	if (! bootloader_verify_crc(&pBuffer[0], common_packet_len - 4, host_crc))
 	{
 		bootloader_send_ack(pBuffer[0], sizeof(supported_commands));
 		bootloader_uart_write_data(supported_commands, sizeof(supported_commands));
@@ -404,12 +404,12 @@ void bootloader_handle_getcid_cmd(uint8_t *pBuffer)
 	uint16_t bl_chip_id = 0;
 
 	// Total length of the command packet
-	uint32_t command_packet_len = bl_rx_buffer[0] + 1;
+	uint32_t command_packet_len = pBuffer[0] + 1;
 
 	//extract the CRC32 sent by the Host
-	uint32_t host_crc = *((uint32_t *)(bl_rx_buffer + command_packet_len - 4));
+	uint32_t host_crc = *((uint32_t *)(pBuffer + command_packet_len - 4));
 
-	if (! bootloader_verify_crc(bl_rx_buffer, command_packet_len - 4, host_crc))
+	if (! bootloader_verify_crc(pBuffer, command_packet_len - 4, host_crc))
 	{
 		bootloader_send_ack(pBuffer[0], 2);
 		bl_chip_id = get_mcu_chip_id();
@@ -424,12 +424,12 @@ void bootloader_handle_getrdp_cmd(uint8_t *pBuffer)
 {
 	uint8_t rdp_level = 0;
 	// Total length of the command packet
-	uint32_t command_packet_len = bl_rx_buffer[0] + 1;
+	uint32_t command_packet_len = pBuffer[0] + 1;
 
 	//extract the CRC32 sent by the Host
-	uint32_t host_crc = *((uint32_t *) (bl_rx_buffer + command_packet_len - 4));
+	uint32_t host_crc = *((uint32_t *) (pBuffer + command_packet_len - 4));
 
-	if (! bootloader_verify_crc(bl_rx_buffer, command_packet_len - 4, host_crc))
+	if (! bootloader_verify_crc(pBuffer, command_packet_len - 4, host_crc))
 	{
 		bootloader_send_ack(pBuffer[0], 1);
 		rdp_level = get_flash_rdp_level();
@@ -447,10 +447,10 @@ void bootloader_handle_go_cmd(uint8_t *pBuffer)
 	uint8_t addr_invalid = ADDR_INVALID;
 
 	// Total length of the command packet
-	uint32_t command_packet_len = bl_rx_buffer[0] + 1;
+	uint32_t command_packet_len = pBuffer[0] + 1;
 
 	//extract the CRC32 sent by the Host
-	uint32_t host_crc = *((uint32_t*) (bl_rx_buffer + command_packet_len - 4));
+	uint32_t host_crc = *((uint32_t*) (pBuffer + command_packet_len - 4));
 
 	if (!bootloader_verify_crc(bl_rx_buffer, command_packet_len - 4, host_crc)) {
 		bootloader_send_ack(pBuffer[0], 1);
@@ -473,13 +473,57 @@ void bootloader_handle_go_cmd(uint8_t *pBuffer)
 		bootloader_send_nack();
 	}
 }
+
 void bootloader_handle_flash_erase_cmd(uint8_t *pBuffer)
 {
+	uint8_t earse_status = 0;
 
+	// Total length of the command packet
+	uint32_t command_packet_len = pBuffer[0] + 1;
+
+	// Extract the CRC32 sent by the Host
+	uint32_t host_crc = *((uint32_t *) (pBuffer + command_packet_len - 4));
+
+	if (! bootloader_verify_crc(&pBuffer[0], command_packet_len-4, host_crc))
+	{
+		bootloader_send_ack(pBuffer[0],1);
+		HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, 1);
+		earse_status = execute_flash_erase(pBuffer[2] , pBuffer[3]);
+		HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, 0);
+		bootloader_uart_write_data(&earse_status, 1);
+	}
+	else {
+		bootloader_send_nack();
+	}
 }
 void bootloader_handle_mem_write_cmd(uint8_t *pBuffer)
 {
+	uint8_t write_status = 0;
+	uint8_t payload_len = pBuffer[6];
+	uint32_t mem_address = *((uint32_t *)(&pBuffer[2]));
 
+
+	uint32_t command_packet_len = pBuffer[0] + 1;
+	 uint32_t host_crc = *((uint32_t * ) (pBuffer + command_packet_len - 4) );
+	 if (! bootloader_verify_crc(&bl_rx_buffer[0], command_packet_len - 4, host_crc))
+	 {
+		 bootloader_send_ack(pBuffer[0], 1);
+
+		 if (verify_address(mem_address) == ADDR_VALID)
+		 {
+			 write_status = execute_mem_write(&pBuffer[7], mem_address, payload_len);
+			 // inform host that address is valid
+			 bootloader_uart_write_data(&write_status, 1);
+		 }
+		 else {
+			 write_status = ADDR_INVALID;
+			 // inform host that address is invalid
+			 bootloader_uart_write_data(&write_status,1);
+		 }
+	 }
+	 else {
+		 bootloader_send_nack();
+	 }
 }
 void bootloader_handle_en_rw_protect(uint8_t *pBuffer)
 {
@@ -581,18 +625,7 @@ uint8_t get_flash_rdp_level(void)
 
 //verify the address sent by the host .
 uint8_t verify_address(uint32_t go_address) {
-
-  //so, what are the valid addresses to which we can jump ?
-  //can we jump to system memory ? yes
-  //can we jump to sram1 memory ?  yes
-  //can we jump to sram2 memory ? yes
-  //can we jump to backup sram memory ? yes
-  //can we jump to peripheral memory ? its possible , but dont allow. so no
-  //can we jump to external memory ? yes.
-
-  //incomplete -poorly written .. optimize it
   if ( go_address >= SRAM1_BASE && go_address <= SRAM1_END) {
-
     return ADDR_VALID;
   } else if ( go_address >= SRAM2_BASE && go_address <= SRAM2_END) {
 
@@ -607,8 +640,63 @@ uint8_t verify_address(uint32_t go_address) {
     return ADDR_INVALID;
 }
 
-uint8_t execute_flash_erase(uint8_t sector_number , uint8_t number_of_sector);
-uint8_t execute_mem_write(uint8_t *pBuffer, uint32_t mem_address, uint32_t len);
+uint8_t execute_flash_erase(uint8_t sector_number , uint8_t number_of_sector)
+{
+	FLASH_EraseInitTypeDef flashErase_handle = {0};
+	uint32_t sectorError = 0;
+	HAL_StatusTypeDef status;
+
+	if (sector_number == 0xFF)
+	{
+		flashErase_handle.Banks = FLASH_BANK_1;
+		flashErase_handle.TypeErase = FLASH_TYPEERASE_MASSERASE;
+	}else if (sector_number <= 11)
+	{
+		if (number_of_sector == 0)
+		{
+			return INVALID_SECTOR;
+		}
+
+		flashErase_handle.Banks = FLASH_BANK_1;
+		/* Limit a range that would extend beyond the last sector. */
+		uint8_t remaining_sector = (uint8_t) (12U - sector_number);
+		if (number_of_sector > remaining_sector) {
+			number_of_sector = remaining_sector;
+		}
+		 flashErase_handle.TypeErase = FLASH_TYPEERASE_SECTORS;
+		 flashErase_handle.Sector = sector_number; // this is the initial sector
+		 flashErase_handle.NbSectors = number_of_sector;
+	}else {
+		return INVALID_SECTOR;
+	}
+
+	/* Get access to touch the flash registers. */
+	HAL_FLASH_Unlock();
+	flashErase_handle.VoltageRange = FLASH_VOLTAGE_RANGE_3;
+	status = HAL_FLASHEx_Erase(&flashErase_handle, &sectorError);
+	HAL_FLASH_Lock();
+
+	return (uint8_t)status;
+}
+
+/*This function writes the contents of pBuffer to  "mem_address" byte by byte */
+//Note1 : Currently this function supports writing to Flash only .
+//Note2 : This functions does not check whether "mem_address" is a valid address of the flash range.
+uint8_t execute_mem_write(uint8_t *pBuffer, uint32_t mem_address, uint32_t len)
+{
+	 uint8_t status = HAL_OK;
+	 // We have to unlock flash module to get control of registers
+	 HAL_FLASH_Unlock();
+
+	 for (uint32_t i = 0; i < len; i++)
+	 {
+		 status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_BYTE, mem_address + i, pBuffer[i]);
+	 }
+
+	 HAL_FLASH_Lock();
+
+	 return status;
+}
 
 uint8_t configure_flash_sector_rw_protection(uint8_t sector_details, uint8_t protection_mode, uint8_t disable);
 
