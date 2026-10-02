@@ -46,6 +46,7 @@
 
 
 #include "stm32f4xx.h"
+#include "boot_config.h"
 
 #if !defined  (HSE_VALUE) 
   #define HSE_VALUE    ((uint32_t)25000000) /*!< Default value of the External oscillator in Hz */
@@ -105,7 +106,7 @@
                                                      This value must be a multiple of 0x200. */
 #endif /* VECT_TAB_SRAM */
 #if !defined(VECT_TAB_OFFSET)
-#define VECT_TAB_OFFSET         0x00008000U     /*!< Vector Table offset field.
+#define VECT_TAB_OFFSET         BOOT_APP_VECTOR_OFFSET  /*!< 0x00020200: slot A + 0x200 header.
                                                      This value must be a multiple of 0x200. */
 #endif /* VECT_TAB_OFFSET */
 #endif /* USER_VECT_TAB_ADDRESS */

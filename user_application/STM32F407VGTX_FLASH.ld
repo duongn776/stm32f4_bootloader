@@ -47,7 +47,7 @@ MEMORY
 {
   CCMRAM    (xrw)    : ORIGIN = 0x10000000,   LENGTH = 64K
   RAM    (xrw)    : ORIGIN = 0x20000000,   LENGTH = 128K
-  FLASH    (rx)    : ORIGIN = 0x8008000,   LENGTH = 512K
+  FLASH    (rx)    : ORIGIN = 0x08020200,   LENGTH = 392704  /* slot A after 0x200 header, see common/boot_config.h */
 }
 
 /* Sections */
