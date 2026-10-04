@@ -96,7 +96,6 @@
 #define UART5_BASEADDR  (APB1PERIPH_BASEADDR + 0x5000) /*!< Base address of UART5 peripheral */
 
 #define TIM2_BASEADDR       (APB1PERIPH_BASEADDR + 0x0000UL)
-#define TIM2_BASEADDR       (APB1PERIPH_BASEADDR + 0x0000UL)
 #define TIM3_BASEADDR       (APB1PERIPH_BASEADDR + 0x0400UL)
 #define TIM4_BASEADDR       (APB1PERIPH_BASEADDR + 0x0800UL)
 #define TIM5_BASEADDR       (APB1PERIPH_BASEADDR + 0x0C00UL)
@@ -778,7 +777,7 @@ typedef struct
 
 //#include "stm32f407xx_i2c.h"
 #include "stm32f407xx_gpio.h"
-//#include "stm32f407xx_spi.h"
+#include "stm32f407xx_spi.h"
 //#include "stm32f407xx_usart.h"
 //#include "stm32f407xx_rcc.h"
 #endif /* INC_STM32F407XX_H_ */

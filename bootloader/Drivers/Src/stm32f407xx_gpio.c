@@ -104,7 +104,7 @@ void GPIO_Init(GPIO_HandleTypeDef *hGPIO)
             EXTI->RTSR |=  (1U << pin);
             EXTI->FTSR |=  (1U << pin);
         }
-        
+
         uint8_t  reg      = pin / 4U;
         uint32_t pos      = pin % 4U;
         uint32_t portCode = GPIO_BASEADDR_TO_CODE(pGPIOx); /* GPIOA = 0 ... GPIOI = 8 */
@@ -299,8 +299,7 @@ void GPIO_IRQHandler(uint8_t GPIO_pin)
     uint32_t mask = (1U << GPIO_pin);
 
     if (EXTI->PR & mask) {
-        /* PR is "write 1 to clear": use '=' not '|=',
-         * otherwise the other pending lines are cleared too */
+        /* PR is write 1 to clear */
         EXTI->PR = mask;
         GPIO_EXTI_Callback(GPIO_pin);
     }
