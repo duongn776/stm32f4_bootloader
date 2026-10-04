@@ -1,17 +1,33 @@
 # STM32CubeIDE workspace metadata
 .metadata/
 **/.settings/
+*.launch.bak
 
 # Generated build output
 **/Debug/
 **/Release/
 *.o
 *.elf
+*.bin.tmp
+*.hex
 *.map
 *.list
 *.d
 *.su
 *.cyclo
+
+# Reference documents (ST/ARM manuals, kept locally only)
+**/Document/
+*.pdf
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Code::Blocks generated files
+*.depend
+*.layout
+*.cscope_file_list
 
 # Temporary/editor files
 *.swp
@@ -19,16 +35,3 @@
 *~
 Thumbs.db
 Desktop.ini
-bootloader_pj/.mxproject
-bootloader_pj/.mxproject
-HOST/C/STM32_Programmer_V1/STM32_Programmer_V1.cbp
-HOST/C/STM32_Programmer_V1/STM32_Programmer_V1.depend
-HOST/C/STM32_Programmer_V1/STM32_Programmer_V1.cscope_file_list
-bootloader_pj/bootloader_pj.ioc
-bootloader_pj/.mxproject
-bootloader_pj/.mxproject
-bootloader_pj/.mxproject
-HOST/C/STM32_Programmer_V1/STM32_Programmer_V1.layout
-HOST/C/STM32_Programmer_V1/user_app.bin
-bootloader_pj/bootloader_pj.ioc
-bootloader_pj/.mxproject
