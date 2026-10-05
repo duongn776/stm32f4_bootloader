@@ -68,6 +68,8 @@
 /*
  * Base addresses of peripherals which are hanging on AHB1 bus
  */
+#define FLASH_R_BASEADDR (AHB1PERIPH_BASEADDR + 0x3C00UL) /*!< Base address of Flash interface registers */
+
 #define GPIOA_BASEADDR   (AHB1PERIPH_BASEADDR + 0x0000) /*!< Base address of GPIO Port A */
 #define GPIOB_BASEADDR   (AHB1PERIPH_BASEADDR + 0x0400) /*!< Base address of GPIO Port B */
 #define GPIOC_BASEADDR   (AHB1PERIPH_BASEADDR + 0x0800) /*!< Base address of GPIO Port C */
@@ -122,6 +124,22 @@
 #define TIM11_BASEADDR     (APB2PERIPH_BASEADDR + 0x4800UL)
 
 /**********************************peripheral register definition structures **********************************/
+
+
+/*
+ * peripheral register definition structure for FLASH
+ */
+typedef struct
+{
+	__vo uint32_t ACR;       /*!< Access control register,      Address offset: 0x00 */
+	__vo uint32_t KEYR;      /*!< Key register,                 Address offset: 0x04 */
+	__vo uint32_t OPTKEYR;   /*!< Option key register,          Address offset: 0x08 */
+	__vo uint32_t SR;        /*!< Status register,              Address offset: 0x0C */
+	__vo uint32_t CR;        /*!< Control register,             Address offset: 0x10 */
+	__vo uint32_t OPTCR;     /*!< Option control register,      Address offset: 0x14 */
+} FLASH_RegDef_t;
+
+
 
 typedef struct
 {
@@ -187,7 +205,6 @@ typedef struct
 	__vo uint32_t SWIER;  /*!< Software Interrupt Event Register, Address offset: 0x10 */
 	__vo uint32_t PR;     /*!< Pending Register, Address offset: 0x14 */
 } EXTI_RegDef_t;
-
 
 /*
  * peripheral register definition structure for SPI
@@ -284,6 +301,8 @@ typedef struct
 /*
  * peripheral definitions ( Peripheral base addresses typecasted to xxx_RegDef_t)
  */
+#define FLASH				((FLASH_RegDef_t*)FLASH_R_BASEADDR)
+
 #define GPIOA  				((GPIO_RegDef_t*)GPIOA_BASEADDR)
 #define GPIOB  				((GPIO_RegDef_t*)GPIOB_BASEADDR)
 #define GPIOC  				((GPIO_RegDef_t*)GPIOC_BASEADDR)
@@ -755,6 +774,44 @@ typedef struct
 #define USART_SR_LBD        			8
 #define USART_SR_CTS        			9
 
+/******************************************************************************************
+ *Bit position definitions of FLASH interface registers
+ ******************************************************************************************/
+
+/*
+ * Bit position definitions FLASH_ACR
+ */
+#define FLASH_ACR_LATENCY				0
+#define FLASH_ACR_PRFTEN				8
+#define FLASH_ACR_ICEN					9
+#define FLASH_ACR_DCEN					10
+#define FLASH_ACR_ICRST					11
+#define FLASH_ACR_DCRST					12
+
+/*
+ * Bit position definitions FLASH_SR
+ */
+#define FLASH_SR_EOP					0
+#define FLASH_SR_OPERR					1
+#define FLASH_SR_WRPERR					4
+#define FLASH_SR_PGAERR					5
+#define FLASH_SR_PGPERR					6
+#define FLASH_SR_PGSERR					7
+#define FLASH_SR_BSY					16
+
+/*
+ * Bit position definitions FLASH_CR
+ */
+#define FLASH_CR_PG						0
+#define FLASH_CR_SER					1
+#define FLASH_CR_MER					2
+#define FLASH_CR_SNB					3	/* 4 bits [6:3] */
+#define FLASH_CR_PSIZE					8	/* 2 bits [9:8] */
+#define FLASH_CR_STRT					16
+#define FLASH_CR_EOPIE					24
+#define FLASH_CR_ERRIE					25
+#define FLASH_CR_LOCK					31
+
 #define GPIO_AF4_I2C1 	4
 #define GPIO_AF4_I2C2 	4
 
@@ -774,10 +831,10 @@ typedef struct
                                        ((INSTANCE) == I2C2) || \
                                        ((INSTANCE) == I2C3))
 
-
-//#include "stm32f407xx_i2c.h"
+#include "stm32f407xx_flash.h"
 #include "stm32f407xx_gpio.h"
-#include "stm32f407xx_spi.h"
-//#include "stm32f407xx_usart.h"
+#include "stm32f407xx_usart.h"
 #include "stm32f407xx_rcc.h"
+
+
 #endif /* INC_STM32F407XX_H_ */
