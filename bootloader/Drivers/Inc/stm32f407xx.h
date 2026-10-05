@@ -779,5 +779,5 @@ typedef struct
 #include "stm32f407xx_gpio.h"
 #include "stm32f407xx_spi.h"
 //#include "stm32f407xx_usart.h"
-//#include "stm32f407xx_rcc.h"
+#include "stm32f407xx_rcc.h"
 #endif /* INC_STM32F407XX_H_ */
