@@ -8,11 +8,26 @@
 #ifndef INC_STM32F407XX_H_
 #define INC_STM32F407XX_H_
 
+#include<stdbool.h>
 #include<stddef.h>
 #include<stdint.h>
 #include<string.h>
 #define __vo volatile
 #define __weak __attribute__((weak))
+
+/*
+ * Global interrupt enable/disable (PRIMASK), e.g. to protect data shared with an ISR.
+ * "memory" is a compiler barrier: memory accesses are not moved across these lines.
+ * Note: ENABLE_IRQ() always enables, so do not nest DISABLE_IRQ()/ENABLE_IRQ() pairs.
+ */
+#define DISABLE_IRQ()   __asm volatile ("cpsid i" ::: "memory")
+#define ENABLE_IRQ()    __asm volatile ("cpsie i" ::: "memory")
+
+/* Set the Main Stack Pointer (used before jumping to the application) */
+#define SET_MSP(sp)     __asm volatile ("msr msp, %0" :: "r" (sp) : "memory")
+
+/* SCB Vector Table Offset Register: address of the active vector table */
+#define SCB_VTOR        (*(__vo uint32_t *)0xE000ED08U)
 
 /**********************************START:Processor Specific Details **********************************/
 /*
@@ -587,8 +602,8 @@ typedef struct
 
 
 //some generic macros
-#define TRUE				1
-#define FALSE				0
+#define TRUE				true	/* bool type: <stdbool.h> */
+#define FALSE				false
 #define ENABLE 				1
 #define DISABLE 			0
 #define SET 				ENABLE
@@ -835,6 +850,6 @@ typedef struct
 #include "stm32f407xx_gpio.h"
 #include "stm32f407xx_usart.h"
 #include "stm32f407xx_rcc.h"
-
+#include "Srec_Parser.h"
 
 #endif /* INC_STM32F407XX_H_ */
