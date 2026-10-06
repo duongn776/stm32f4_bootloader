@@ -54,6 +54,10 @@
 
 #define APP_END_ADDR            (APP_START_ADDR + SLOT_SIZE)    /* 0x08040000, first address after the app */
 
+/* SREC addresses are App addresses (0x0802xxxx): add this offset to write
+   the same data into the Download slot (0x0804xxxx) */
+#define DL_OFFSET               (DL_START_ADDR - APP_START_ADDR) /* 0x00020000 */
+
 /* RAM: valid range for the application initial stack pointer */
 #define RAM_START_ADDR          0x20000000U
 #define RAM_END_ADDR            0x20020000U     /* 128 KB */

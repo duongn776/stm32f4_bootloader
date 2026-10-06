@@ -12,13 +12,23 @@
  *     1. Init UART2 (PA2 TX, PA3 RX, 115200 8N1) and the USER button PA0
  *     2. Read button:
  *        • Pressed     → Bootloader mode:
- *                          erase App area → receive .SREC over UART
- *                          → parse each line → program data into flash
+ *                          erase DOWNLOAD area → receive .SREC over UART
+ *                          → parse each line → program data into DOWNLOAD
+ *                          → answer ACK / NACK to the flash tool
+ *                          (App area is not touched: a failed or interrupted
+ *                           download never breaks the running application)
  *        • Not pressed → jump to UserApp at APP_START_ADDR (0x08020000)
  *
  *   Data path in Bootloader mode:
  *     UART RX interrupt ──(1 char)──> line buffer ──(1 line)──> queue
- *     main loop: queue ──> SREC_Parse_Line() ──> Flash_WriteByte()
+ *     main loop: queue ──> SREC_Parse_Line() ──> Flash_WriteByte() ──> ACK
+ *
+ *   The SREC file is linked for the App area (0x0802xxxx). Each address is
+ *   checked against the App area, then written at address + DL_OFFSET
+ *   (0x0804xxxx) in the DOWNLOAD area.
+ *
+ *   Settings, messages and types: bootloader_config.h
+ *   Flash layout:                 memory_map.h
  *
  *   Clock: HSI 16 MHz after reset (no PLL), enough for 115200 baud.
  ******************************************************************************/
@@ -26,36 +36,9 @@
 #include "stm32f407xx.h"
 #include "stm32f407xx_nvic.h"
 #include "memory_map.h"
+#include "bootloader_config.h"
 #include "Srec_Parser.h"
 #include "Circular_Queue.h"
-
-
-/*******************************************************************************
- * Definitions
- ******************************************************************************/
-#define BTN_PORT            GPIOA
-#define BTN_PIN             GPIO_PIN_0      /* USER button (active high, pull-down on board) */
-
-#define FLASH_WORD_SIZE     4U              /* Flash is programmed 4 bytes at a time (PSIZE x32) */
-#define NO_WORD             0xFFFFFFFFU     /* wordAddr value when buffer is empty     */
-
-/* TEST switch for the flash write method:
- *   1 = word buffer (normal): bytes are collected into 4-byte words, each word programmed once
- *   0 = direct write: each SREC record is programmed 4 bytes at a time from its own address,
- *       without buffer → fails when an address is not 4-byte aligned or a word is split
- *       between two records */
-#define USE_WORD_BUFFER     1
-
-/* UART messages */
-#define MSG_READY           "UART ready!!!\r\n"
-#define MSG_ERASE           "Erasing APP area...\r\n"
-#define MSG_ERASE_DONE      "Erase done.\r\n"
-#define MSG_BOOT            "Entering Bootloader mode...\r\n"
-#define MSG_APP             "Jumping to UserApp...\r\n"
-#define MSG_NO_APP          "No valid UserApp found!\r\n"
-
-/* Function pointer type for UserApp entry point (Reset_Handler) */
-typedef void (*AppEntry_t)(void);
 
 /*******************************************************************************
  * Global Variables
@@ -70,29 +53,22 @@ static SrecQueue_t srecQueue;
 static volatile uint8_t queueOverflow = 0U;         /* Set by interrupt if a line was dropped    */
 static volatile uint8_t uartError = 0U;             /* Set by interrupt on overrun/framing/noise */
 
-#if USE_WORD_BUFFER
 /* 4-byte flash word being collected before programming */
 static uint8_t     wordBuf[FLASH_WORD_SIZE];
 static uint32_t    wordAddr = NO_WORD;              /* 4-byte aligned start address */
-#endif
-
 static uint32_t    flashErrors = 0U;                /* Failed Flash_ProgramWord() calls */
 
 /*******************************************************************************
  * Function Prototypes
  ******************************************************************************/
-static void    UART_SendString(const char *s);
-static void    UART_Init(void);
-static void    Button_Init(void);
-#if USE_WORD_BUFFER
-static void    Flash_FlushWord(void);
-static void    Flash_WriteByte(uint32_t addr, uint8_t value);
-#else
-static void    Flash_WriteRecord(uint32_t addr, const uint8_t *data, uint32_t len);
-#endif
-static bool    Bootloader_HandleSrecRecord(const SREC_Record_t *rec);
-static void    Bootloader_Mode(void);
-static void    JumpToUserApp(void);
+static void        UART_SendString(const char *s);
+static void        UART_Init(void);
+static void        Button_Init(void);
+static void        Flash_FlushWord(void);
+static void        Flash_WriteByte(uint32_t addr, uint8_t value);
+static RecResult_t Bootloader_HandleSrecRecord(const SREC_Record_t *rec);
+static void        Bootloader_Mode(void);
+static void        JumpToUserApp(void);
 
 /*******************************************************************************
  * Button
@@ -151,7 +127,7 @@ static void UART_Init(void)
     USART_Init(&husart2);
     USART_PeripheralControl(USART2, ENABLE);
 
-    NVIC_SetPriority(IRQ_NO_USART2, 5);
+    NVIC_SetPriority(IRQ_NO_USART2, UART_IRQ_PRIORITY);
     NVIC_IRQConfig(IRQ_NO_USART2, ENABLE);
 }
 
@@ -201,7 +177,6 @@ void USART2_IRQHandler(void)
     USART_IRQHandler(&husart2);
 }
 
-#if USE_WORD_BUFFER
 /*******************************************************************************
  * Flash write (4-byte word buffer)
  *
@@ -257,43 +232,6 @@ static void Flash_WriteByte(uint32_t addr, uint8_t value)
     wordBuf[addr & (FLASH_WORD_SIZE - 1U)] = value;
 }
 
-#else
-/*******************************************************************************
- * Flash write (TEST: direct, no buffer)
- *
- *   Each record is programmed 4 bytes at a time starting at its own address.
- *   Problems this shows:
- *     - address not 4-byte aligned → Flash_ProgramWord() fails (PGAERR)
- *     - a word split between two records is programmed twice
- ******************************************************************************/
-/**
- * @brief Program the data of one record directly, 4 bytes at a time
- *
- * @param addr Flash address of the first byte
- * @param data Data bytes
- * @param len  Number of bytes
- */
-static void Flash_WriteRecord(uint32_t addr, const uint8_t *data, uint32_t len)
-{
-    uint32_t i;
-    uint32_t n;
-    uint32_t word;
-
-    for (i = 0U; i < len; i += FLASH_WORD_SIZE)
-    {
-        /* Last group may be shorter than 4 bytes: the rest stays 0xFF */
-        n = ((len - i) < FLASH_WORD_SIZE) ? (len - i) : FLASH_WORD_SIZE;
-        word = 0xFFFFFFFFU;
-        memcpy(&word, &data[i], n);
-
-        if (Flash_ProgramWord(addr + i, word) != FLASH_OK)
-        {
-            flashErrors++;
-        }
-    }
-}
-#endif /* USE_WORD_BUFFER */
-
 /*******************************************************************************
  * Bootloader
  ******************************************************************************/
@@ -302,63 +240,50 @@ static void Flash_WriteRecord(uint32_t addr, const uint8_t *data, uint32_t len)
  *
  *   S0       : header           → ignored
  *   S5       : record count     → ignored
- *   S1/S2/S3 : data             → written to flash (only inside App area)
+ *   S1/S2/S3 : data             → App address checked, data written into
+ *                                 the DOWNLOAD area (address + DL_OFFSET)
  *   S7/S8/S9 : end of file      → program the last word
  *
+ * A flash error is found by comparing flashErrors before and after writing.
+ * A word is programmed only when the next word starts, so an error in the
+ * last bytes of a record is reported with the next record.
+ *
  * @param rec Parsed SREC record
- * @return true if an end-of-file record was received, false otherwise
+ * @return Result of the record (see RecResult_t)
  */
-static bool Bootloader_HandleSrecRecord(const SREC_Record_t *rec)
+static RecResult_t Bootloader_HandleSrecRecord(const SREC_Record_t *rec)
 {
     uint32_t i;
+    uint32_t errorsBefore = flashErrors;
 
     switch (rec->record_type)
     {
-        case SREC_TYPE_S0:
-        case SREC_TYPE_S5:
-            return false;
-
         case SREC_TYPE_S1:
         case SREC_TYPE_S2:
         case SREC_TYPE_S3:
-            /* Protect the Bootloader: only write inside the erased App area */
+            /* The file must be built for the App area (0x0802xxxx) */
             if ((rec->address < APP_START_ADDR) ||
                 ((rec->address + rec->data_length) > APP_END_ADDR))
             {
-                UART_SendString("ERROR: address outside App area, line skipped!\r\n");
-                return false;
+                return REC_ERR_RANGE;
             }
 
-#if USE_WORD_BUFFER
+            /* Same data, one slot higher: App 0x0802xxxx → DOWNLOAD 0x0804xxxx */
             for (i = 0U; i < rec->data_length; i++)
             {
-                Flash_WriteByte(rec->address + i, rec->data[i]);
+                Flash_WriteByte(rec->address + DL_OFFSET + i, rec->data[i]);
             }
-#else
-            (void)i;
-            Flash_WriteRecord(rec->address, rec->data, rec->data_length);
-#endif
-            return false;
+            return (flashErrors != errorsBefore) ? REC_ERR_FLASH : REC_OK;
 
         case SREC_TYPE_S7:
         case SREC_TYPE_S8:
         case SREC_TYPE_S9:
-#if USE_WORD_BUFFER
             Flash_FlushWord();
-#endif
-            UART_SendString("SREC END DETECTED\r\n");
-
-            /* Reported once at the end: printing on every error would slow down
-               the main loop and make the queue overflow */
-            if (flashErrors != 0U)
-            {
-                UART_SendString("ERROR: flash program failed (see flashErrors in the debugger)\r\n");
-            }
-            return true;
+            return (flashErrors != errorsBefore) ? REC_ERR_FLASH : REC_END;
 
         default:
-            UART_SendString("Unknown SREC record\r\n");
-            return false;
+            /* S0 header, S5/S6 record count: nothing to write */
+            return REC_OK;
     }
 }
 
@@ -372,46 +297,64 @@ static void Bootloader_Mode(void)
 {
     char          srecLine[QUEUE_MAX_LINE_LEN];
     SREC_Record_t record;
-    bool          isEndOfFile;
 
-    UART_SendString("\r\n=== BOOTLOADER MODE ===\r\n");
-    UART_SendString("Send .SREC file via UART to update firmware.\r\n");
+    UART_SendString(MSG_BL_MODE);
+    UART_SendString(MSG_SEND_SREC);
 
     Queue_Init(&srecQueue);
     USART_Receive_IT(&husart2, &uartRxChar, 1);     /* Start receiving */
+
+    /* Sent only after reception is started, so the first line of the PC
+       cannot arrive before the bootloader listens */
+    UART_SendString(MSG_BL_READY);
 
     while (1)
     {
         if (queueOverflow)
         {
             queueOverflow = 0U;
-            UART_SendString("ERROR: queue full, SREC line lost!\r\n");
+            UART_SendString(MSG_ERR_QUEUE);
         }
 
         if (uartError)
         {
             uartError = 0U;
-            UART_SendString("ERROR: UART receive error, character lost!\r\n");
+            UART_SendString(MSG_ERR_UART);
         }
 
-        if (Queue_Pop(&srecQueue, srecLine))
+        if (!Queue_Pop(&srecQueue, srecLine))
         {
-            if (SREC_Parse_Line(srecLine, &record))
-            {
-                isEndOfFile = Bootloader_HandleSrecRecord(&record);
+            continue;
+        }
 
-                if (isEndOfFile)
-                {
-                    Flash_Lock();
-                    UART_SendString("\r\n=== FINISHED ===\r\n");
-                    UART_SendString("Release the boot button and reset the board to run UserApp.\r\n");
-                }
-            }
-            else
-            {
-                /* Wrong checksum, bad hex character or wrong length */
-                UART_SendString("ERROR: invalid SREC line, skipped!\r\n");
-            }
+        /* Exactly one answer per line, sent only after the line is
+           written to flash: the PC waits for it before the next line */
+        if (!SREC_Parse_Line(srecLine, &record))
+        {
+            UART_SendString(MSG_NACK_PARSE);    /* Wrong checksum, bad hex or wrong length */
+            continue;
+        }
+
+        switch (Bootloader_HandleSrecRecord(&record))
+        {
+            case REC_END:
+                UART_SendString(MSG_ACK);
+                Flash_Lock();
+                UART_SendString(MSG_DOWNLOAD_DONE);
+                break;
+
+            case REC_ERR_RANGE:
+                UART_SendString(MSG_NACK_RANGE);
+                break;
+
+            case REC_ERR_FLASH:
+                UART_SendString(MSG_NACK_FLASH);
+                break;
+
+            case REC_OK:
+            default:
+                UART_SendString(MSG_ACK);
+                break;
         }
     }
 }
@@ -463,14 +406,14 @@ int main(void)
     UART_Init();
     Button_Init();
 
-    UART_SendString(MSG_READY);
+    UART_SendString(MSG_UART_READY);
 
     if (GPIO_ReadPin(BTN_PORT, BTN_PIN) == GPIO_PIN_SET)   /* Button pressed (active high) */
     {
         UART_SendString(MSG_ERASE);
-        if ((Flash_Unlock() != FLASH_OK) || (Flash_EraseSector(APP_SECTOR) != FLASH_OK))
+        if ((Flash_Unlock() != FLASH_OK) || (Flash_EraseSector(DL_SECTOR) != FLASH_OK))
         {
-            UART_SendString("ERROR: erase failed!\r\n");
+            UART_SendString(MSG_ERR_ERASE);
             while (1)
             {
             }
@@ -488,6 +431,4 @@ int main(void)
     while (1)
     {
     }
-
-    return 0;
 }
