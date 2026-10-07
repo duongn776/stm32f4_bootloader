@@ -14,14 +14,19 @@
  *        • Pressed     → Bootloader mode:
  *                          erase DOWNLOAD area → receive .SREC over UART
  *                          → parse each line → program data into DOWNLOAD
- *                          → answer ACK / NACK to the flash tool
- *                          (App area is not touched: a failed or interrupted
- *                           download never breaks the running application)
+ *                          → end of file: no error → install (copy DOWNLOAD → APP)
+ *                                         error    → App not changed
+ *                          (App area is not touched during the download: a
+ *                           failed or interrupted download never breaks the
+ *                           running application)
  *        • Not pressed → jump to UserApp at APP_START_ADDR (0x08020000)
  *
  *   Data path in Bootloader mode:
  *     UART RX interrupt ──(1 char)──> line buffer ──(1 line)──> queue
- *     main loop: queue ──> SREC_Parse_Line() ──> Flash_WriteByte() ──> ACK
+ *     main loop: queue ──> SREC_Parse_Line() ──> Flash_WriteByte()
+ *
+ *   The file is sent as a whole from a terminal (Hercules): no answer per
+ *   line, only errors are printed.
  *
  *   The SREC file is linked for the App area (0x0802xxxx). Each address is
  *   checked against the App area, then written at address + DL_OFFSET
@@ -67,6 +72,8 @@ static void        Button_Init(void);
 static void        Flash_FlushWord(void);
 static void        Flash_WriteByte(uint32_t addr, uint8_t value);
 static RecResult_t Bootloader_HandleSrecRecord(const SREC_Record_t *rec);
+static bool        Bootloader_Install(void);
+static bool        Bootloader_InstallInterrupted(void);
 static void        Bootloader_Mode(void);
 static void        JumpToUserApp(void);
 
@@ -288,15 +295,92 @@ static RecResult_t Bootloader_HandleSrecRecord(const SREC_Record_t *rec)
 }
 
 /**
+ * @brief Install the downloaded firmware: copy DOWNLOAD area → APP area
+ *
+ *   1. Write the flag PENDING (APP is about to be erased), skipped when
+ *      resuming an interrupted install (PENDING is already there)
+ *   2. Erase the APP sector
+ *   3. Copy the whole slot word by word (erased words 0xFFFFFFFF are
+ *      skipped: the APP sector is already 0xFF after the erase)
+ *   4. Compare APP with DOWNLOAD
+ *   5. Write the flag DONE
+ *
+ * If the power is lost between 1 and 5, main() finds PENDING without DONE
+ * at the next reset and calls this function again.
+ *
+ * Flash must be unlocked.
+ *
+ * @return true if APP is now an exact copy of DOWNLOAD
+ */
+static bool Bootloader_Install(void)
+{
+    const uint32_t *src = (const uint32_t *)DL_START_ADDR;
+    uint32_t        i;
+
+    /* New install: erase the flags of the previous one (a flash word can
+       only be programmed once between two erases), then write PENDING.
+       Resumed install: PENDING is already written and must stay, APP is
+       already broken, so the flags must never be erased here */
+    if (!Bootloader_InstallInterrupted())
+    {
+        if ((Flash_EraseSector(META_A_SECTOR) != FLASH_OK) ||
+            (Flash_ProgramWord(FLAG_PENDING_ADDR, INSTALL_PENDING) != FLASH_OK))
+        {
+            return false;
+        }
+    }
+
+    if (Flash_EraseSector(APP_SECTOR) != FLASH_OK)
+    {
+        return false;
+    }
+
+    for (i = 0U; i < (SLOT_SIZE / FLASH_WORD_SIZE); i++)
+    {
+        if (src[i] == 0xFFFFFFFFU)
+        {
+            continue;
+        }
+
+        if (Flash_ProgramWord(APP_START_ADDR + (i * FLASH_WORD_SIZE), src[i]) != FLASH_OK)
+        {
+            return false;
+        }
+    }
+
+    if (memcmp((const void *)APP_START_ADDR, (const void *)DL_START_ADDR, SLOT_SIZE) != 0)
+    {
+        return false;
+    }
+
+    return (Flash_ProgramWord(FLAG_DONE_ADDR, INSTALL_DONE) == FLASH_OK);
+}
+
+/**
+ * @brief Check if the last install was interrupted (power lost)
+ *
+ * @return true if PENDING is written but DONE is not
+ */
+static bool Bootloader_InstallInterrupted(void)
+{
+    return (*(volatile uint32_t *)FLAG_PENDING_ADDR == INSTALL_PENDING) &&
+           (*(volatile uint32_t *)FLAG_DONE_ADDR != INSTALL_DONE);
+}
+
+/**
  * @brief Bootloader mode: receive SREC lines over UART and program them
  *
  * The UART interrupt fills srecQueue; this loop takes one line at a time,
- * parses it and writes its data into flash. This function never returns.
+ * parses it and writes its data into flash. Nothing is answered per line,
+ * only errors are printed. A line with an error is lost (no resend), so
+ * at the end of file the image is installed only if there was no error.
+ * This function never returns.
  */
 static void Bootloader_Mode(void)
 {
     char          srecLine[QUEUE_MAX_LINE_LEN];
     SREC_Record_t record;
+    uint32_t      errors = 0U;                      /* Errors during this download */
 
     UART_SendString(MSG_BL_MODE);
     UART_SendString(MSG_SEND_SREC);
@@ -304,21 +388,19 @@ static void Bootloader_Mode(void)
     Queue_Init(&srecQueue);
     USART_Receive_IT(&husart2, &uartRxChar, 1);     /* Start receiving */
 
-    /* Sent only after reception is started, so the first line of the PC
-       cannot arrive before the bootloader listens */
-    UART_SendString(MSG_BL_READY);
-
     while (1)
     {
         if (queueOverflow)
         {
             queueOverflow = 0U;
+            errors++;
             UART_SendString(MSG_ERR_QUEUE);
         }
 
         if (uartError)
         {
             uartError = 0U;
+            errors++;
             UART_SendString(MSG_ERR_UART);
         }
 
@@ -327,33 +409,48 @@ static void Bootloader_Mode(void)
             continue;
         }
 
-        /* Exactly one answer per line, sent only after the line is
-           written to flash: the PC waits for it before the next line */
         if (!SREC_Parse_Line(srecLine, &record))
         {
-            UART_SendString(MSG_NACK_PARSE);    /* Wrong checksum, bad hex or wrong length */
+            errors++;
+            UART_SendString(MSG_ERR_PARSE);
             continue;
         }
 
         switch (Bootloader_HandleSrecRecord(&record))
         {
             case REC_END:
-                UART_SendString(MSG_ACK);
+                if (errors != 0U)
+                {
+                    UART_SendString(MSG_DOWNLOAD_FAIL);     /* APP not touched */
+                }
+                else
+                {
+                    UART_SendString(MSG_DOWNLOAD_DONE);
+                    UART_SendString(MSG_INSTALL);
+                    if (Bootloader_Install())
+                    {
+                        UART_SendString(MSG_INSTALL_DONE);
+                    }
+                    else
+                    {
+                        UART_SendString(MSG_ERR_INSTALL);
+                    }
+                }
                 Flash_Lock();
-                UART_SendString(MSG_DOWNLOAD_DONE);
                 break;
 
             case REC_ERR_RANGE:
-                UART_SendString(MSG_NACK_RANGE);
+                errors++;
+                UART_SendString(MSG_ERR_RANGE);
                 break;
 
             case REC_ERR_FLASH:
-                UART_SendString(MSG_NACK_FLASH);
+                errors++;
+                UART_SendString(MSG_ERR_FLASH);
                 break;
 
             case REC_OK:
             default:
-                UART_SendString(MSG_ACK);
                 break;
         }
     }
@@ -407,6 +504,22 @@ int main(void)
     Button_Init();
 
     UART_SendString(MSG_UART_READY);
+
+    /* Power lost during the last install: APP is erased or half copied,
+       DOWNLOAD still holds the complete new firmware → copy it again */
+    if (Bootloader_InstallInterrupted())
+    {
+        UART_SendString(MSG_RESUME);
+        if ((Flash_Unlock() != FLASH_OK) || !Bootloader_Install())
+        {
+            UART_SendString(MSG_ERR_INSTALL);
+            while (1)                       /* Do not jump into a broken APP */
+            {
+            }
+        }
+        Flash_Lock();
+        UART_SendString(MSG_RESUME_DONE);
+    }
 
     if (GPIO_ReadPin(BTN_PORT, BTN_PIN) == GPIO_PIN_SET)   /* Button pressed (active high) */
     {
