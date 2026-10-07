@@ -28,7 +28,6 @@
 
 /* SCB Vector Table Offset Register: address of the active vector table */
 #define SCB_VTOR        (*(__vo uint32_t *)0xE000ED08U)
-
 /**********************************START:Processor Specific Details **********************************/
 /*
  * ARM Cortex Mx Processor NVIC ISERx register Addresses

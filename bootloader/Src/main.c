@@ -11,10 +11,12 @@
  *   Flow after reset:
  *     1. Init UART2 (PA2 TX, PA3 RX, 115200 8N1) and the USER button PA0
  *     2. Read button:
- *        • Pressed     → Bootloader mode:
+ *        • Pressed     → Bootloader mode (line "ROLLBACK" instead of a file:
+ *                          copy BACKUP → APP, then run the old App):
  *                          erase DOWNLOAD area → receive .SREC over UART
  *                          → parse each line → program data into DOWNLOAD
- *                          → end of file: no error → install (copy DOWNLOAD → APP)
+ *                          → end of file: no error → install (backup APP → BACKUP,
+ *                                                    then copy DOWNLOAD → APP)
  *                                         error    → App not changed
  *                          (App area is not touched during the download: a
  *                           failed or interrupted download never breaks the
@@ -72,8 +74,13 @@ static void        Button_Init(void);
 static void        Flash_FlushWord(void);
 static void        Flash_WriteByte(uint32_t addr, uint8_t value);
 static RecResult_t Bootloader_HandleSrecRecord(const SREC_Record_t *rec);
+static bool        App_IsValid(uint32_t slotAddr);
+static bool        Copy_Slot(uint32_t srcAddr, uint32_t dstAddr, uint8_t dstSector);
 static bool        Bootloader_Install(void);
 static bool        Bootloader_InstallInterrupted(void);
+static bool        Bootloader_Rollback(void);
+static bool        Bootloader_RollbackInterrupted(void);
+static void        Bootloader_RollbackCmd(void);
 static void        Bootloader_Mode(void);
 static void        JumpToUserApp(void);
 
@@ -295,42 +302,50 @@ static RecResult_t Bootloader_HandleSrecRecord(const SREC_Record_t *rec)
 }
 
 /**
- * @brief Install the downloaded firmware: copy DOWNLOAD area → APP area
+ * @brief Check the vector table of an App image stored in a slot
  *
- *   1. Write the flag PENDING (APP is about to be erased), skipped when
- *      resuming an interrupted install (PENDING is already there)
- *   2. Erase the APP sector
- *   3. Copy the whole slot word by word (erased words 0xFFFFFFFF are
- *      skipped: the APP sector is already 0xFF after the erase)
- *   4. Compare APP with DOWNLOAD
- *   5. Write the flag DONE
+ *   [slotAddr + 0] : initial stack pointer → must be inside RAM
+ *   [slotAddr + 4] : Reset_Handler         → must be inside the App area
+ *                                            with bit 0 = 1 (Thumb)
  *
- * If the power is lost between 1 and 5, main() finds PENDING without DONE
- * at the next reset and calls this function again.
+ * Every image is linked for the App area, so Reset_Handler is checked
+ * against the App area also for an image stored in DOWNLOAD or BACKUP.
+ * Erased flash (0xFFFFFFFF) fails both checks.
  *
- * Flash must be unlocked.
- *
- * @return true if APP is now an exact copy of DOWNLOAD
+ * @param slotAddr Start address of the slot (APP, DOWNLOAD or BACKUP)
+ * @return true if the vector table looks valid
  */
-static bool Bootloader_Install(void)
+static bool App_IsValid(uint32_t slotAddr)
 {
-    const uint32_t *src = (const uint32_t *)DL_START_ADDR;
+    uint32_t appStack = *(volatile uint32_t *)(slotAddr);
+    uint32_t appReset = *(volatile uint32_t *)(slotAddr + 4U);
+
+    return (appStack >= RAM_START_ADDR) && (appStack <= RAM_END_ADDR) &&
+           (appReset >= APP_START_ADDR) && (appReset < APP_END_ADDR) &&
+           ((appReset & 1U) != 0U);
+}
+
+/**
+ * @brief Copy one slot into another one
+ *
+ *   1. Erase the destination sector
+ *   2. Copy the whole slot word by word (erased words 0xFFFFFFFF are
+ *      skipped: the destination is already 0xFF after the erase)
+ *   3. Compare destination with source
+ *
+ * The source is only read. Flash must be unlocked.
+ *
+ * @param srcAddr   Start address of the source slot
+ * @param dstAddr   Start address of the destination slot
+ * @param dstSector Sector of the destination slot
+ * @return true if the destination is now an exact copy of the source
+ */
+static bool Copy_Slot(uint32_t srcAddr, uint32_t dstAddr, uint8_t dstSector)
+{
+    const uint32_t *src = (const uint32_t *)srcAddr;
     uint32_t        i;
 
-    /* New install: erase the flags of the previous one (a flash word can
-       only be programmed once between two erases), then write PENDING.
-       Resumed install: PENDING is already written and must stay, APP is
-       already broken, so the flags must never be erased here */
-    if (!Bootloader_InstallInterrupted())
-    {
-        if ((Flash_EraseSector(META_A_SECTOR) != FLASH_OK) ||
-            (Flash_ProgramWord(FLAG_PENDING_ADDR, INSTALL_PENDING) != FLASH_OK))
-        {
-            return false;
-        }
-    }
-
-    if (Flash_EraseSector(APP_SECTOR) != FLASH_OK)
+    if (Flash_EraseSector(dstSector) != FLASH_OK)
     {
         return false;
     }
@@ -342,13 +357,80 @@ static bool Bootloader_Install(void)
             continue;
         }
 
-        if (Flash_ProgramWord(APP_START_ADDR + (i * FLASH_WORD_SIZE), src[i]) != FLASH_OK)
+        if (Flash_ProgramWord(dstAddr + (i * FLASH_WORD_SIZE), src[i]) != FLASH_OK)
         {
             return false;
         }
     }
 
-    if (memcmp((const void *)APP_START_ADDR, (const void *)DL_START_ADDR, SLOT_SIZE) != 0)
+    return (memcmp((const void *)dstAddr, (const void *)srcAddr, SLOT_SIZE) == 0);
+}
+
+/**
+ * @brief Install the downloaded firmware, keeping the old App in BACKUP
+ *
+ *   1. Write the flag PENDING (BACKUP / APP are about to be erased),
+ *      skipped when resuming an interrupted install (PENDING is already there)
+ *   2. Backup: copy APP → BACKUP (skipped if APP is not valid, e.g. the
+ *      first install), then write the flag BACKUP_DONE
+ *   3. Copy DOWNLOAD → APP
+ *   4. Write the flag DONE
+ *
+ * APP is erased only after BACKUP_DONE is written, so:
+ *   - BACKUP_DONE missing → APP still holds the old App
+ *   - BACKUP_DONE written → BACKUP holds the old App
+ *
+ * If the power is lost between 1 and 4, main() finds PENDING without DONE
+ * at the next reset and calls this function again.
+ *
+ * Flash must be unlocked.
+ *
+ * @return true if APP is now an exact copy of DOWNLOAD
+ */
+static bool Bootloader_Install(void)
+{
+    /* New install: erase the flags of the previous one (a flash word can
+       only be programmed once between two erases), then write PENDING.
+       Resumed install: PENDING is already written and must stay, APP may
+       be already broken, so the flags must never be erased here */
+    if (!Bootloader_InstallInterrupted())
+    {
+        if ((Flash_EraseSector(META_A_SECTOR) != FLASH_OK) ||
+            (Flash_ProgramWord(FLAG_PENDING_ADDR, INSTALL_PENDING) != FLASH_OK))
+        {
+            return false;
+        }
+    }
+
+    /* Backup step, done only once per install: if BACKUP_DONE is already
+       written, APP may be half copied and must never be copied over the
+       old App stored in BACKUP */
+    if (*(volatile uint32_t *)FLAG_BACKUP_ADDR != BACKUP_DONE)
+    {
+        if (App_IsValid(APP_START_ADDR))
+        {
+            UART_SendString(MSG_BACKUP);
+            if (!Copy_Slot(APP_START_ADDR, BK_START_ADDR, BK_SECTOR))
+            {
+                UART_SendString(MSG_ERR_BACKUP);
+                return false;
+            }
+        }
+        else
+        {
+            UART_SendString(MSG_BACKUP_SKIP);   /* BACKUP keeps what it had */
+        }
+
+        /* Written also when skipped: from now on APP is erased, a resumed
+           install must not try to back it up */
+        if (Flash_ProgramWord(FLAG_BACKUP_ADDR, BACKUP_DONE) != FLASH_OK)
+        {
+            return false;
+        }
+    }
+
+    UART_SendString(MSG_INSTALL);
+    if (!Copy_Slot(DL_START_ADDR, APP_START_ADDR, APP_SECTOR))
     {
         return false;
     }
@@ -365,6 +447,93 @@ static bool Bootloader_InstallInterrupted(void)
 {
     return (*(volatile uint32_t *)FLAG_PENDING_ADDR == INSTALL_PENDING) &&
            (*(volatile uint32_t *)FLAG_DONE_ADDR != INSTALL_DONE);
+}
+
+/**
+ * @brief Rollback: copy the old App from BACKUP back into APP
+ *
+ *   1. Write the flag ROLLBACK_PENDING (APP is about to be erased),
+ *      skipped when resuming an interrupted rollback
+ *   2. Copy BACKUP → APP
+ *   3. Write the flag ROLLBACK_DONE
+ *
+ * Same protection as the install: if the power is lost between 1 and 3,
+ * main() finds ROLLBACK_PENDING without ROLLBACK_DONE at the next reset and
+ * calls this function again. BACKUP is only read, so it is never lost.
+ *
+ * The caller checks that BACKUP holds a valid App. Flash must be unlocked.
+ *
+ * @return true if APP is now an exact copy of BACKUP
+ */
+static bool Bootloader_Rollback(void)
+{
+    /* New rollback: erase the flags of the last install / rollback (APP is
+       still valid here), then write ROLLBACK_PENDING.
+       Resumed rollback: APP is broken, the flags must never be erased */
+    if (!Bootloader_RollbackInterrupted())
+    {
+        if ((Flash_EraseSector(META_A_SECTOR) != FLASH_OK) ||
+            (Flash_ProgramWord(FLAG_RB_PENDING_ADDR, ROLLBACK_PENDING) != FLASH_OK))
+        {
+            return false;
+        }
+    }
+
+    if (!Copy_Slot(BK_START_ADDR, APP_START_ADDR, APP_SECTOR))
+    {
+        return false;
+    }
+
+    return (Flash_ProgramWord(FLAG_RB_DONE_ADDR, ROLLBACK_DONE) == FLASH_OK);
+}
+
+/**
+ * @brief Check if the last rollback was interrupted (power lost)
+ *
+ * @return true if ROLLBACK_PENDING is written but ROLLBACK_DONE is not
+ */
+static bool Bootloader_RollbackInterrupted(void)
+{
+    return (*(volatile uint32_t *)FLAG_RB_PENDING_ADDR == ROLLBACK_PENDING) &&
+           (*(volatile uint32_t *)FLAG_RB_DONE_ADDR != ROLLBACK_DONE);
+}
+
+/**
+ * @brief Command "ROLLBACK" received in Bootloader mode
+ *
+ *   No valid App in BACKUP → error, APP not touched, stay in Bootloader mode
+ *   Otherwise              → copy BACKUP → APP, then run the old App
+ *
+ * Returns only if there is no backup.
+ */
+static void Bootloader_RollbackCmd(void)
+{
+    if (!App_IsValid(BK_START_ADDR))
+    {
+        UART_SendString(MSG_ERR_NO_BACKUP);
+        return;
+    }
+
+    UART_SendString(MSG_ROLLBACK);
+
+    /* Flash is unlocked in Bootloader mode, but locked again after an install */
+    if ((Flash_Unlock() != FLASH_OK) || !Bootloader_Rollback())
+    {
+        UART_SendString(MSG_ERR_ROLLBACK);
+        while (1)                           /* Do not jump into a broken APP */
+        {
+        }
+    }
+    Flash_Lock();
+    UART_SendString(MSG_ROLLBACK_DONE);
+
+    UART_SendString(MSG_APP);
+    JumpToUserApp();
+
+    /* Only reached when there is no valid UserApp */
+    while (1)
+    {
+    }
 }
 
 /**
@@ -409,6 +578,12 @@ static void Bootloader_Mode(void)
             continue;
         }
 
+        if (strcmp(srecLine, CMD_ROLLBACK) == 0)
+        {
+            Bootloader_RollbackCmd();       /* Returns only if there is no backup */
+            continue;
+        }
+
         if (!SREC_Parse_Line(srecLine, &record))
         {
             errors++;
@@ -426,7 +601,6 @@ static void Bootloader_Mode(void)
                 else
                 {
                     UART_SendString(MSG_DOWNLOAD_DONE);
-                    UART_SendString(MSG_INSTALL);
                     if (Bootloader_Install())
                     {
                         UART_SendString(MSG_INSTALL_DONE);
@@ -471,11 +645,7 @@ static void JumpToUserApp(void)
     uint32_t   appReset = *(volatile uint32_t *)(APP_START_ADDR + 4U);
     AppEntry_t appEntry = (AppEntry_t)appReset;
 
-    /* Valid app: stack pointer inside RAM, Reset_Handler inside the App area
-       with bit 0 = 1 (Thumb). Erased flash (0xFFFFFFFF) fails both checks */
-    if ((appStack < RAM_START_ADDR) || (appStack > RAM_END_ADDR) ||
-        (appReset < APP_START_ADDR) || (appReset >= APP_END_ADDR) ||
-        ((appReset & 1U) == 0U))
+    if (!App_IsValid(APP_START_ADDR))
     {
         UART_SendString(MSG_NO_APP);
         return;
@@ -519,6 +689,21 @@ int main(void)
         }
         Flash_Lock();
         UART_SendString(MSG_RESUME_DONE);
+    }
+
+    /* Power lost during the last rollback: same idea, BACKUP is complete */
+    if (Bootloader_RollbackInterrupted())
+    {
+        UART_SendString(MSG_ROLLBACK_RESUME);
+        if ((Flash_Unlock() != FLASH_OK) || !Bootloader_Rollback())
+        {
+            UART_SendString(MSG_ERR_ROLLBACK);
+            while (1)                       /* Do not jump into a broken APP */
+            {
+            }
+        }
+        Flash_Lock();
+        UART_SendString(MSG_ROLLBACK_DONE);
     }
 
     if (GPIO_ReadPin(BTN_PORT, BTN_PIN) == GPIO_PIN_SET)   /* Button pressed (active high) */
